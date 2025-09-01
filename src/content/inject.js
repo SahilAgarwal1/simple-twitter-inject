@@ -1,6 +1,13 @@
 const INJECT_CLASS = "__simple_x_inject";
 
-export const alreadyInjected = (tweet) => !!tweet.querySelector(`.${INJECT_CLASS}`);
+export const alreadyInjected = (tweet) =>
+  !!tweet.dataset.simpleXProcessed || !!tweet.querySelector(`.${INJECT_CLASS}`);
+
+export const markProcessed = (tweet) => {
+  if (tweet && tweet instanceof Element) {
+    tweet.dataset.simpleXProcessed = "1";
+  }
+};
 
 export const injectBanner = (tweet, label) => {
   const banner = document.createElement("div");

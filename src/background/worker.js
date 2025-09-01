@@ -63,7 +63,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const client = getSupabase();
           if (client && dim > 0) {
             const { data, error } = await client
-              .rpc("match_top_poly_market", { query_embedding: vector, match_threshold: 0 });
+              .rpc("match_top_poly_market", { query_embedding: vector, match_threshold: 0.45});
             if (error) {
               console.warn("[worker] RPC error:", error.message);
             } else if (Array.isArray(data) && data.length) {
