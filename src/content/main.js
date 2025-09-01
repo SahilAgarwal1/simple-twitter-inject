@@ -1,5 +1,5 @@
 import { findTweets, extractTweetText } from "./text";
-import { alreadyInjected, injectBanner } from "./inject";
+import { alreadyInjected } from "./inject";
 import { renderPolymarketEmbed } from "./polymarketEmbed";
 
 const requestEmbedding = (id, text) => new Promise((resolve) => {
@@ -14,23 +14,17 @@ const scan = async (root = document) => {
     if (alreadyInjected(tweet)) continue;
     const text = extractTweetText(tweet);
     const id = crypto.randomUUID ? crypto.randomUUID() : String(Math.random());
-    const start = performance.now();
     const resp = await requestEmbedding(id, text);
-    const elapsed = Math.round(performance.now() - start);
-    let label = "Embedding failed";
-    if (resp && resp.ok) {
-      const { embedMs, modelLoadMs = 0, dim, topMarket } = resp;
-      label = `Embedding: ${embedMs} ms (req: ${elapsed} ms) • dim=${dim}${modelLoadMs ? ` • modelLoad=${modelLoadMs} ms` : ""}`;
-      if (resp.market) {
-        const embed = renderPolymarketEmbed(resp.market);
-        injectBanner(tweet, label);
-        tweet.querySelector(".__simple_x_inject").appendChild(embed);
-        continue;
+    if (resp && resp.ok && resp.market) {
+      const embed = renderPolymarketEmbed(resp.market);
+      const toolbar = tweet.querySelector('div[role="group"]');
+      if (toolbar && toolbar.parentElement) {
+        toolbar.parentElement.insertBefore(embed, toolbar);
+      } else {
+        tweet.appendChild(embed);
       }
-    } else if (resp && resp.error) {
-      label = `Error: ${resp.error}`;
+      continue;
     }
-    injectBanner(tweet, label);
   }
 };
 
