@@ -1,0 +1,17 @@
+{
+  "name": "simple-twitter-inject",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build:content": "esbuild src/content/main.js --bundle --outfile=dist/content.js --format=iife --target=chrome110 --minify",
+    "build:worker": "esbuild src/background/worker.js --bundle --outfile=dist/background.js --format=esm --platform=browser --target=chrome110 --minify",
+    "build": "npm run build:content && npm run build:worker",
+    "build:watch": "npm run build && esbuild src/content/main.js src/background/worker.js --bundle --outdir=dist --format=iife --target=chrome110 --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.5"
+  },
+  "dependencies": {
+    "@xenova/transformers": "^2.17.2"
+  }
+}
