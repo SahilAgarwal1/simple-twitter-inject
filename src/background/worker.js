@@ -58,24 +58,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // Query Supabase RPC for top market
         let topMarket = null;
+        let market = null;
         try {
           const client = getSupabase();
           if (client && dim > 0) {
             const { data, error } = await client
-              .rpc("match_top_poly_market", { query_embedding: vector, match_threshold: 0 })
-              .limit(1);
+              .rpc("match_top_poly_market", { query_embedding: vector, match_threshold: 0 });
             if (error) {
               console.warn("[worker] RPC error:", error.message);
             } else if (Array.isArray(data) && data.length) {
               // data rows shaped as { id, question }
               topMarket = data[0];
+              // Fetch full market from Gamma API in background to avoid CORS in content
+              try {
+                const resp = await fetch(`https://gamma-api.polymarket.com/markets/${encodeURIComponent(topMarket.id)}`);
+                if (resp.ok) {
+                  market = await resp.json();
+                }
+              } catch (_) {}
             }
           }
         } catch (e) {
           console.warn("[worker] RPC call failed", e);
         }
 
-        sendResponse({ ok: true, id, embedMs, modelLoadMs: modelLoadMs ?? 0, dim, topMarket });
+        sendResponse({ ok: true, id, embedMs, modelLoadMs: modelLoadMs ?? 0, dim, topMarket, market });
       } catch (e) {
         sendResponse({ ok: false, error: String((e && e.message) || e) });
       }

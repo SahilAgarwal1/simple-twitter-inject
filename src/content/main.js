@@ -1,5 +1,6 @@
 import { findTweets, extractTweetText } from "./text";
 import { alreadyInjected, injectBanner } from "./inject";
+import { renderPolymarketEmbed } from "./polymarketEmbed";
 
 const requestEmbedding = (id, text) => new Promise((resolve) => {
   chrome.runtime.sendMessage({ type: "embed", id, text }, (resp) => {
@@ -19,8 +20,13 @@ const scan = async (root = document) => {
     let label = "Embedding failed";
     if (resp && resp.ok) {
       const { embedMs, modelLoadMs = 0, dim, topMarket } = resp;
-      const marketLabel = topMarket && topMarket.question ? ` • Top market: ${topMarket.question} (#${topMarket.id})` : "";
-      label = `Embedding: ${embedMs} ms (req: ${elapsed} ms) • dim=${dim}${modelLoadMs ? ` • modelLoad=${modelLoadMs} ms` : ""}${marketLabel}`;
+      label = `Embedding: ${embedMs} ms (req: ${elapsed} ms) • dim=${dim}${modelLoadMs ? ` • modelLoad=${modelLoadMs} ms` : ""}`;
+      if (resp.market) {
+        const embed = renderPolymarketEmbed(resp.market);
+        injectBanner(tweet, label);
+        tweet.querySelector(".__simple_x_inject").appendChild(embed);
+        continue;
+      }
     } else if (resp && resp.error) {
       label = `Error: ${resp.error}`;
     }
