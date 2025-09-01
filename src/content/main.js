@@ -18,8 +18,9 @@ const scan = async (root = document) => {
     const elapsed = Math.round(performance.now() - start);
     let label = "Embedding failed";
     if (resp && resp.ok) {
-      const { embedMs, modelLoadMs = 0, dim } = resp;
-      label = `Embedding: ${embedMs} ms (req: ${elapsed} ms) • dim=${dim}${modelLoadMs ? ` • modelLoad=${modelLoadMs} ms` : ""}`;
+      const { embedMs, modelLoadMs = 0, dim, topMarket } = resp;
+      const marketLabel = topMarket && topMarket.question ? ` • Top market: ${topMarket.question} (#${topMarket.id})` : "";
+      label = `Embedding: ${embedMs} ms (req: ${elapsed} ms) • dim=${dim}${modelLoadMs ? ` • modelLoad=${modelLoadMs} ms` : ""}${marketLabel}`;
     } else if (resp && resp.error) {
       label = `Error: ${resp.error}`;
     }

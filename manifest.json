@@ -8,12 +8,16 @@
     "type": "module"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https://huggingface.co https://*.huggingface.co https://cdn.jsdelivr.net"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co https://cdn.jsdelivr.net https://*.supabase.co http://127.0.0.1:54321 http://localhost:54321"
   },
   "host_permissions": [
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
-    "https://cdn.jsdelivr.net/*"
+    "https://*.hf.co/*",
+    "https://cdn.jsdelivr.net/*",
+    "https://*.supabase.co/*",
+    "http://127.0.0.1:54321/*",
+    "http://localhost:54321/*"
   ],
   "content_scripts": [
     {
