@@ -75,16 +75,50 @@ function deriveTokenId(market) {
 
 function normalizeToPercent(points) {
   if (!points.length) return [];
-  const max = Math.max(...points.map(p => p.p));
-  // Convert to [0,100]
-  let scaleFn = (v) => v;
+  // Normalize timestamps (ms->s), sort ascending, and deduplicate by time
+  const sampleMaxT = Math.max(...points.map(p => Number(p.t) || 0));
+  const toSeconds = sampleMaxT > 1e10; // treat > ~Sat Nov 20 2286 as ms guard
+  const cleaned = points
+    .map(p => ({ time: toSeconds ? Math.floor(Number(p.t) / 1000) : Math.floor(Number(p.t)), valueRaw: Number(p.p) }))
+    .filter(p => Number.isFinite(p.time) && p.time > 0 && Number.isFinite(p.valueRaw));
+  cleaned.sort((a, b) => a.time - b.time);
+  const dedup = [];
+  let lastTime = null;
+  for (const p of cleaned) {
+    if (p.time === lastTime) { dedup[dedup.length - 1] = p; continue; }
+    dedup.push(p); lastTime = p.time;
+  }
+  if (!dedup.length) return [];
+  const max = Math.max(...dedup.map(p => p.valueRaw));
+  let scaleFn = (v) => v; // Convert to [0,100]
   if (max <= 1) {
     scaleFn = (v) => v * 100;
   } else if (max > 100) {
     // Values likely in basis points (eg 1800.75 => 18.0075%)
     scaleFn = (v) => v / 100;
   }
-  return points.map(pt => ({ time: pt.t, value: Number(scaleFn(pt.p).toFixed(2)) }));
+  return dedup.map(pt => ({ time: pt.time, value: Number(scaleFn(pt.valueRaw).toFixed(2)) }));
+}
+
+function ensureVisibleRange(points) {
+  if (!Array.isArray(points) || points.length === 0) return points;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const p of points) {
+    const v = Number(p?.value);
+    if (Number.isFinite(v)) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max) || points.length < 2) return points;
+  if (Math.abs(max - min) < 1e-9) {
+    // Series is flat (e.g., stuck at 0% or 100%). Nudge first point slightly within bounds
+    const eps = max <= 0 ? 0.05 : (max >= 100 ? -1 : 1);
+    points = points.slice();
+    points[0] = { ...points[0], value: Math.max(0, Math.min(100, Number(points[0].value) + eps)) };
+  }
+  return points;
 }
 
 function pickPrimaryMarketFromEvent(event) {
@@ -127,15 +161,61 @@ function extractYesPercent(market) {
   return null;
 }
 
+function extractYesPriceCents(market) {
+  // Return a number in [0,100], possibly fractional
+  const outcomes = parseMaybeJsonArray(market?.outcomes);
+  const prices = parseMaybeJsonArray(market?.outcomePrices);
+  const normalize = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    if (n <= 1) return n * 100;
+    if (n > 100) return n / 100;
+    return n;
+  };
+  if (outcomes.length && prices.length && outcomes.length === prices.length) {
+    let idx = outcomes.findIndex(o => /yes/i.test(String(o)));
+    if (idx < 0) idx = 0;
+    const val = normalize(prices[idx]);
+    if (val !== null) return Math.min(100, Math.max(0, val));
+  }
+  const bestBid = Number(market?.bestBid);
+  const bestAsk = Number(market?.bestAsk);
+  let mid = Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestAsk > 0 ? (bestBid + bestAsk) / 2 : Number(market?.lastTradePrice);
+  const val = normalize(mid);
+  if (val !== null) return Math.min(100, Math.max(0, val));
+  const pct = extractYesPercent(market);
+  return pct === null ? null : pct;
+}
+
+function formatCents(value) {
+  if (!Number.isFinite(value)) return "--";
+  // Show one decimal if meaningful (e.g., 7.3c)
+  const v = Math.max(0, Math.min(100, value));
+  const rounded1 = Math.round(v * 10) / 10;
+  const isInt = Math.abs(rounded1 - Math.round(rounded1)) < 1e-9;
+  return isInt ? `${Math.round(rounded1)}c` : `${rounded1.toFixed(1)}c`;
+}
+
 export function renderPolymarketEmbed(event) {
   const root = document.createElement("div");
   root.className = "__simple_x_inject";
+
+  // Markets (used for header % in single-market events and for list rendering)
+  const mkts = Array.isArray(event?.markets) ? event.markets.slice() : [];
+  const isSingleMarket = mkts.length === 1;
 
   const header = document.createElement("div");
   header.style.display = "flex";
   header.style.gap = "10px";
   header.style.alignItems = "center";
+  header.style.justifyContent = "space-between";
+  header.style.width = "100%";
   header.style.marginBottom = "6px";
+
+  const headerLeft = document.createElement("div");
+  headerLeft.style.display = "flex";
+  headerLeft.style.gap = "10px";
+  headerLeft.style.alignItems = "center";
 
   const imgUrl = event?.icon || event?.image || event?.featuredImage;
   if (imgUrl) {
@@ -148,7 +228,7 @@ export function renderPolymarketEmbed(event) {
     img.style.objectFit = "cover";
     img.style.borderRadius = "8px";
     img.style.flex = "0 0 auto";
-    header.appendChild(img);
+    headerLeft.appendChild(img);
   }
 
   const headerText = document.createElement("div");
@@ -168,7 +248,20 @@ export function renderPolymarketEmbed(event) {
 
   headerText.appendChild(title);
   headerText.appendChild(meta);
-  header.appendChild(headerText);
+  headerLeft.appendChild(headerText);
+
+  header.appendChild(headerLeft);
+
+  if (isSingleMarket) {
+    const yesPriceHeader = extractYesPriceCents(mkts[0]);
+    const pctEl = document.createElement("div");
+    pctEl.style.fontWeight = "800";
+    pctEl.style.fontSize = "16px";
+    pctEl.style.minWidth = "56px";
+    pctEl.style.textAlign = "right";
+    pctEl.textContent = Number.isFinite(yesPriceHeader) ? `${Math.round(yesPriceHeader)}%` : "--";
+    header.appendChild(pctEl);
+  }
 
   // Outcomes grid removed to simplify header
 
@@ -189,24 +282,7 @@ export function renderPolymarketEmbed(event) {
   chartStatus.style.left = "10px";
   chartContainer.appendChild(chartStatus);
 
-  const desc = document.createElement("div");
-  desc.style.marginTop = "8px";
-  desc.style.display = "-webkit-box";
-  desc.style.webkitBoxOrient = "vertical";
-  desc.style.webkitLineClamp = "2";
-  desc.style.overflow = "hidden";
-  desc.style.textOverflow = "ellipsis";
-  desc.textContent = event?.description || "";
-
-  const toggle = document.createElement("button");
-  toggle.textContent = "Show more";
-  toggle.style.display = "none";
-  toggle.style.background = "transparent";
-  toggle.style.border = "none";
-  toggle.style.color = "#3dd68c";
-  toggle.style.cursor = "pointer";
-  toggle.style.padding = "0";
-  toggle.style.marginTop = "4px";
+  // Description intentionally omitted in embed
 
   root.appendChild(header);
   // If matches list is provided (lightweight mode), render list and skip chart/detail
@@ -235,10 +311,9 @@ export function renderPolymarketEmbed(event) {
     return root;
   }
 
-  // Chart lives before description
+  // Chart lives before market list
   root.appendChild(chartContainer);
-  if (event?.description) root.appendChild(desc);
-  if (event?.description) root.appendChild(toggle);
+  // No description appended
 
   // Kick off async chart load
   const primaryMarket = pickPrimaryMarketFromEvent(event);
@@ -262,6 +337,7 @@ export function renderPolymarketEmbed(event) {
         });
         const series = chart.addAreaSeries({
           lineColor: "#3dd68c",
+          lineWidth: 1,
           topColor: "rgba(61,214,140,0.25)",
           bottomColor: "rgba(61,214,140,0.0)",
           priceFormat: {
@@ -270,9 +346,77 @@ export function renderPolymarketEmbed(event) {
             formatter: (v) => `${v.toFixed(2)}%`,
           },
         });
-        series.setData(data);
-        // Fit the visible range to the loaded data
+        // Hide last value price line/label (the green badge in the chart)
+        series.applyOptions({ lastValueVisible: false, priceLineVisible: false });
+        // Lock scroll/zoom interactions
+        chart.applyOptions({ handleScroll: false, handleScale: false, timeScale: { borderVisible: false } });
+
+        // Timeframe controls
+        const tfRow = document.createElement("div");
+        tfRow.style.display = "flex";
+        tfRow.style.gap = "6px";
+        tfRow.style.marginTop = "8px";
+        const tfs = [
+          { key: "1H", seconds: 60 * 60, interval: "1h", fidelity: 1 },
+          { key: "6H", seconds: 6 * 60 * 60, interval: "1h", fidelity: 1 },
+          { key: "1D", seconds: 24 * 60 * 60, interval: "1d", fidelity: 1 },
+          { key: "1W", seconds: 7 * 24 * 60 * 60, interval: "1w", fidelity: 5 },
+          { key: "1M", seconds: 30 * 24 * 60 * 60, interval: "1w", fidelity: 5 },
+          { key: "ALL", seconds: null, interval: "1w", fidelity: 5 },
+        ];
+        let current = "1W";
+
+        function styleTf(btn, active) {
+          btn.style.background = active ? "#1f2937" : "transparent";
+          btn.style.color = "#9ca3af";
+          btn.style.border = "1px solid rgba(255,255,255,0.08)";
+          btn.style.borderRadius = "6px";
+          btn.style.padding = "4px 8px";
+          btn.style.fontSize = "12px";
+          btn.style.cursor = "pointer";
+        }
+
+        async function loadTimeframe(tf) {
+          try {
+            chartStatus.textContent = "Loading chart…";
+            chartStatus.style.display = "block";
+            const now = Math.floor(Date.now() / 1000);
+            const startTs = tf.seconds == null ? undefined : (now - tf.seconds);
+            const raw2 = await fetchPriceHistory(tokenId, { interval: tf.interval, fidelity: tf.fidelity, startTs });
+            let data2 = normalizeToPercent(raw2);
+            data2 = ensureVisibleRange(data2);
+            // Guard against rare duplicate-last-point artifacts by nudging last timestamp forward by 1s
+            if (data2.length > 1 && data2[data2.length - 1].time <= data2[data2.length - 2].time) {
+              data2[data2.length - 1].time = data2[data2.length - 2].time + 1;
+            }
+            series.setData(data2);
+            chart.timeScale().fitContent();
+            chartStatus.style.display = "none";
+          } catch (_) {
+            chartStatus.textContent = "Chart unavailable";
+          }
+        }
+
+        const buttons = [];
+        tfs.forEach(tf => {
+          const b = document.createElement("button");
+          b.textContent = tf.key;
+          styleTf(b, tf.key === current);
+          b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            current = tf.key;
+            buttons.forEach(x => styleTf(x.el, x.tf.key === current));
+            loadTimeframe(tf);
+          });
+          buttons.push({ el: b, tf });
+          tfRow.appendChild(b);
+        });
+
+        // Initial data and controls
+        series.setData(ensureVisibleRange(data));
         chart.timeScale().fitContent();
+        // Place timeframe buttons outside the chart container so they are visible
+        root.appendChild(tfRow);
 
         const ro = new ResizeObserver(entries => {
           for (const entry of entries) {
@@ -291,41 +435,74 @@ export function renderPolymarketEmbed(event) {
     chartStatus.textContent = "Chart unavailable";
   }
 
-  if (event?.description) {
-    queueMicrotask(() => {
-      const isOverflowing = desc.scrollHeight > desc.clientHeight + 1;
-      toggle.style.display = isOverflowing ? "inline" : "none";
-    });
-    let expanded = false;
-    toggle.addEventListener("click", () => {
-      expanded = !expanded;
-      if (expanded) {
-        desc.style.webkitLineClamp = "";
-        desc.style.display = "block";
-        toggle.textContent = "Show less";
-      } else {
-        desc.style.display = "-webkit-box";
-        desc.style.webkitBoxOrient = "vertical";
-        desc.style.webkitLineClamp = "2";
-        toggle.textContent = "Show more";
-      }
-    });
-  }
+  // No description toggle
 
   // Sub-markets list
-  const mkts = Array.isArray(event?.markets) ? event.markets.slice() : [];
   if (mkts.length) {
-    mkts.sort((a, b) => (Number(b?.liquidityClob || 0) + Number(b?.liquidityAmm || 0)) - (Number(a?.liquidityClob || 0) + Number(a?.liquidityAmm || 0)));
+    if (isSingleMarket) {
+      // Render only the buttons full-width
+      const m = mkts[0];
+      const yesPrice = extractYesPriceCents(m);
+      const btns = document.createElement("div");
+      btns.style.display = "grid";
+      btns.style.gridTemplateColumns = "1fr 1fr";
+      btns.style.gap = "12px";
+      btns.style.marginTop = "10px";
+
+      function makeBtn(text, bg) {
+        const b = document.createElement("button");
+        b.textContent = text;
+        b.style.background = bg;
+        b.style.color = "#dfe7e4";
+        b.style.border = "none";
+        b.style.borderRadius = "12px";
+        b.style.height = "40px";
+        b.style.padding = "0 16px";
+        b.style.width = "100%";
+        b.style.fontWeight = "800";
+        b.style.cursor = "pointer";
+        b.style.whiteSpace = "nowrap";
+        b.style.boxShadow = "inset 0 0 0 1px rgba(255,255,255,0.06)";
+        b.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const slug = m?.slug || event?.slug;
+          if (slug) window.open(`https://polymarket.com/market/${encodeURIComponent(slug)}`, "_blank");
+        });
+        return b;
+      }
+
+      const yesBtn = makeBtn(`Buy Yes ${formatCents(yesPrice)}`, "#265a4a");
+      const noPrice = Number.isFinite(yesPrice) ? 100 - yesPrice : null;
+      const noBtn = makeBtn(`Buy No ${formatCents(noPrice)}`, "#5a2a33");
+      btns.appendChild(yesBtn);
+      btns.appendChild(noBtn);
+      root.appendChild(btns);
+      return root;
+    }
+    // Sort by descending probability
+    mkts.sort((a, b) => {
+      const ay = extractYesPercent(a);
+      const by = extractYesPercent(b);
+      if (Number.isFinite(ay) && Number.isFinite(by)) return by - ay;
+      if (Number.isFinite(ay)) return -1;
+      if (Number.isFinite(by)) return 1;
+      const al = Number(a?.liquidityClob || 0) + Number(a?.liquidityAmm || 0);
+      const bl = Number(b?.liquidityClob || 0) + Number(b?.liquidityAmm || 0);
+      return bl - al;
+    });
     const list = document.createElement("div");
     list.style.display = "grid";
     list.style.gridTemplateColumns = "1fr";
     list.style.gap = "8px";
     list.style.marginTop = "10px";
+    const rows = [];
+    const hiddenRows = [];
     for (const m of mkts) {
       const row = document.createElement("div");
-      row.style.display = "flex";
+      row.style.display = "grid";
+      row.style.gridTemplateColumns = "1fr 56px 240px"; // label | % | fixed buttons area
       row.style.alignItems = "center";
-      row.style.justifyContent = "space-between";
+      row.style.columnGap = "10px";
       row.style.padding = "8px 10px";
       row.style.border = "1px solid rgba(0,0,0,0.08)";
       row.style.borderRadius = "8px";
@@ -336,41 +513,119 @@ export function renderPolymarketEmbed(event) {
       left.style.gap = "8px";
 
       if (m?.icon || m?.image) {
-        const mi = document.createElement("img");
-        mi.src = m.icon || m.image;
-        mi.alt = "";
-        mi.referrerPolicy = "no-referrer";
-        mi.style.width = "20px";
-        mi.style.height = "20px";
-        mi.style.objectFit = "cover";
-        mi.style.borderRadius = "4px";
-        left.appendChild(mi);
+        const marketImgSrc = m.icon || m.image;
+        // Only render if distinct from the event image
+        if (marketImgSrc && marketImgSrc !== imgUrl) {
+          const mi = document.createElement("img");
+          mi.src = marketImgSrc;
+          mi.alt = "";
+          mi.referrerPolicy = "no-referrer";
+          mi.style.width = "20px";
+          mi.style.height = "20px";
+          mi.style.objectFit = "cover";
+          mi.style.borderRadius = "4px";
+          left.appendChild(mi);
+        }
       }
 
       const label = document.createElement("div");
-      label.textContent = String(m?.groupItemTitle || m?.question || m?.title || "");
+      // Prefer groupItemTitle explicitly; fall back only if null/undefined
+      label.textContent = String((m?.groupItemTitle ?? m?.question ?? m?.title ?? ""));
       label.style.fontWeight = "500";
       left.appendChild(label);
 
-      const right = document.createElement("div");
-      const pct = extractYesPercent(m);
-      right.textContent = Number.isFinite(pct) ? `${pct}%` : "--";
-      right.style.fontWeight = "700";
-      right.style.color = "#16a34a";
-      right.style.marginLeft = "12px";
+      const yesPrice = extractYesPriceCents(m);
+
+      const mid = document.createElement("div");
+      mid.style.fontWeight = "800";
+      mid.style.textAlign = "center";
+      mid.style.fontSize = "18px";
+      mid.style.minWidth = "56px";
+      mid.textContent = Number.isFinite(yesPrice) ? `${Math.round(yesPrice)}%` : "--";
+
+      const btns = document.createElement("div");
+      btns.style.display = "grid";
+      btns.style.gridTemplateColumns = "1fr 1fr";
+      btns.style.gap = "8px";
+      btns.style.width = "240px"; // enforce consistent button width across rows
+
+      function makeBtn(text, bg) {
+        const b = document.createElement("button");
+        b.textContent = text;
+        // Softer, muted backgrounds closer to the reference, with lighter text
+        b.style.background = bg;
+        b.style.color = "#dfe7e4";
+        b.style.border = "none";
+        b.style.borderRadius = "12px";
+        b.style.height = "36px";
+        b.style.padding = "0 12px";
+        b.style.width = "100%";
+        b.style.fontWeight = "800";
+        b.style.cursor = "pointer";
+        b.style.whiteSpace = "nowrap";
+        b.style.boxShadow = "inset 0 0 0 1px rgba(255,255,255,0.06)";
+        b.onmouseenter = () => { b.style.filter = "brightness(1.02)"; };
+        b.onmouseleave = () => { b.style.filter = "none"; };
+        b.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const slug = m?.slug || event?.slug;
+          if (slug) window.open(`https://polymarket.com/market/${encodeURIComponent(slug)}`, "_blank");
+        });
+        return b;
+      }
+
+      const yesBtn = makeBtn(`Buy Yes ${formatCents(yesPrice)}`, "#265a4a");
+      const noPrice = Number.isFinite(yesPrice) ? 100 - yesPrice : null;
+      const noBtn = makeBtn(`Buy No ${formatCents(noPrice)}`, "#5a2a33");
+
+      btns.appendChild(yesBtn);
+      btns.appendChild(noBtn);
 
       row.appendChild(left);
-      row.appendChild(right);
+      row.appendChild(mid);
+      row.appendChild(btns);
 
       row.style.cursor = "pointer";
-      row.addEventListener("click", () => {
+      row.addEventListener("click", (e) => {
         const slug = m?.slug || event?.slug;
         if (slug) window.open(`https://polymarket.com/market/${encodeURIComponent(slug)}`, "_blank");
       });
 
-      list.appendChild(row);
+      rows.push(row);
     }
-    root.appendChild(list);
+
+    // Show only top 3 rows initially
+    const MAX_VISIBLE = 3;
+    if (rows.length > MAX_VISIBLE) {
+      rows.slice(0, MAX_VISIBLE).forEach(r => list.appendChild(r));
+      rows.slice(MAX_VISIBLE).forEach(r => hiddenRows.push(r));
+      const toggleMore = document.createElement("button");
+      toggleMore.textContent = `Show more (${rows.length - MAX_VISIBLE})`;
+      toggleMore.style.background = "transparent";
+      toggleMore.style.border = "none";
+      toggleMore.style.color = "#3dd68c";
+      toggleMore.style.cursor = "pointer";
+      toggleMore.style.padding = "0";
+      toggleMore.style.marginTop = "6px";
+      toggleMore.style.fontWeight = "600";
+    let expanded = false;
+      toggleMore.addEventListener("click", (e) => {
+        e.stopPropagation();
+      expanded = !expanded;
+      if (expanded) {
+          hiddenRows.forEach(r => list.appendChild(r));
+          toggleMore.textContent = "Show less";
+      } else {
+          hiddenRows.forEach(r => { if (r.parentElement === list) list.removeChild(r); });
+          toggleMore.textContent = `Show more (${rows.length - MAX_VISIBLE})`;
+        }
+      });
+      root.appendChild(list);
+      root.appendChild(toggleMore);
+    } else {
+      rows.forEach(r => list.appendChild(r));
+      root.appendChild(list);
+    }
   }
 
   return root;
