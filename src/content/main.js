@@ -1,6 +1,7 @@
 import { findTweets, extractTweetText } from "./text";
 import { alreadyInjected, markProcessed } from "./inject";
 import { renderPolymarketEmbed } from "./polymarketEmbed";
+import { ensureBreakingNewsBox } from "./sidebar";
 
 // Lightweight LRU+TTL cache for embedding results to avoid re-querying on scroll
 const MAX_CACHE_ENTRIES = 500;
@@ -76,6 +77,8 @@ const requestEmbedding = (id, text) => {
   return p;
 };
 
+// Sidebar logic moved to ./sidebar
+
 function getHideUnmatched() {
   return new Promise((resolve) => {
     try {
@@ -87,6 +90,8 @@ function getHideUnmatched() {
 }
 
 const scan = async (root = document) => {
+  // Keep the sidebar box in place
+  ensureBreakingNewsBox();
   const hideUnmatched = await getHideUnmatched();
   const tweets = findTweets(root);
   for (const tweet of tweets) {
@@ -128,8 +133,12 @@ const scan = async (root = document) => {
 };
 
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => scan(document));
+  document.addEventListener("DOMContentLoaded", () => {
+    ensureBreakingNewsBox();
+    scan(document);
+  });
 } else {
+  ensureBreakingNewsBox();
   scan(document);
 }
 
