@@ -16,6 +16,7 @@ env.backends.onnx.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/@xenova/transfo
 let pipelinePromise = null;
 let modelLoadMs = null;
 let supabase = null;
+const GAMMA_API = "https://gamma-api.polymarket.com";
 
 function getSupabase() {
   if (!supabase) {
@@ -56,33 +57,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const vector = Array.from(output?.data || []);
         const dim = vector.length || 0;
 
-        // Query Supabase RPC for top market
-        let topMarket = null;
-        let market = null;
+        // Query Supabase RPC for top markets (return 3)
+        let matches = [];
+        let event = null;
         try {
           const client = getSupabase();
           if (client && dim > 0) {
             const { data, error } = await client
-              .rpc("match_top_poly_market", { query_embedding: vector, match_threshold: 0.45});
+              .rpc("match_top_poly_event", { query_embedding: vector, match_threshold: 0.4, top_k: 3 });
             if (error) {
               console.warn("[worker] RPC error:", error.message);
             } else if (Array.isArray(data) && data.length) {
-              // data rows shaped as { id, question }
-              topMarket = data[0];
-              // Fetch full market from Gamma API in background to avoid CORS in content
-              try {
-                const resp = await fetch(`https://gamma-api.polymarket.com/markets/${encodeURIComponent(topMarket.id)}`);
-                if (resp.ok) {
-                  market = await resp.json();
+              // rows: [{ id, title, similarity }, ...]
+              matches = data;
+              // Fetch full event by top match id from Gamma API (avoids CORS in content script)
+              const top = matches[0];
+              if (top && (top.id !== undefined && top.id !== null)) {
+                try {
+                  const resp = await fetch(`${GAMMA_API}/events/${encodeURIComponent(top.id)}`, { headers: { "Accept": "application/json" } });
+                  if (resp.ok) {
+                    event = await resp.json();
+                    if (event && typeof top.similarity === "number") event._similarity = top.similarity;
+                  }
+                } catch (e) {
+                  // ignore fetch errors; fall back to matches-only
                 }
-              } catch (_) {}
+              }
             }
           }
         } catch (e) {
           console.warn("[worker] RPC call failed", e);
         }
 
-        sendResponse({ ok: true, id, embedMs, modelLoadMs: modelLoadMs ?? 0, dim, topMarket, market });
+        sendResponse({ ok: true, id, embedMs, modelLoadMs: modelLoadMs ?? 0, dim, matches, event });
       } catch (e) {
         sendResponse({ ok: false, error: String((e && e.message) || e) });
       }

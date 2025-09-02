@@ -3,12 +3,12 @@ import { createChart } from "lightweight-charts";
 const API_BASE = "https://gamma-api.polymarket.com";
 const CLOB_BASE = "https://clob.polymarket.com";
 
-export async function fetchMarketById(id) {
-  const resp = await fetch(`${API_BASE}/markets/${encodeURIComponent(id)}`, {
+export async function fetchEventById(id) {
+  const resp = await fetch(`${API_BASE}/events/${encodeURIComponent(id)}`, {
     method: "GET",
     headers: { "Accept": "application/json" },
   });
-  if (!resp.ok) throw new Error(`Gamma get market failed: ${resp.status}`);
+  if (!resp.ok) throw new Error(`Gamma get event failed: ${resp.status}`);
   return await resp.json();
 }
 
@@ -87,42 +87,93 @@ function normalizeToPercent(points) {
   return points.map(pt => ({ time: pt.t, value: Number(scaleFn(pt.p).toFixed(2)) }));
 }
 
-export function renderPolymarketEmbed(market) {
+function pickPrimaryMarketFromEvent(event) {
+  const markets = Array.isArray(event?.markets) ? event.markets : [];
+  if (!markets.length) return null;
+  // Prefer market with highest liquidityClob + liquidityAmm (fallback to first)
+  let best = markets[0];
+  let bestScore = Number(best?.liquidityClob || 0) + Number(best?.liquidityAmm || 0);
+  for (let i = 1; i < markets.length; i++) {
+    const m = markets[i];
+    const score = Number(m?.liquidityClob || 0) + Number(m?.liquidityAmm || 0);
+    if (score > bestScore) { best = m; bestScore = score; }
+  }
+  return best;
+}
+
+function extractYesPercent(market) {
+  // Try outcomePrices aligned with outcomes
+  const outcomes = parseMaybeJsonArray(market?.outcomes);
+  const prices = parseMaybeJsonArray(market?.outcomePrices);
+  if (outcomes.length && prices.length && outcomes.length === prices.length) {
+    let idx = outcomes.findIndex(o => /yes/i.test(String(o)));
+    if (idx < 0) idx = 0;
+    const raw = Number(prices[idx]);
+    if (Number.isFinite(raw)) {
+      if (raw <= 1) return Math.round(raw * 100);
+      if (raw > 100) return Math.round(raw / 100);
+      return Math.round(raw);
+    }
+  }
+  // Fallback to mid of best bid/ask or last trade
+  const bestBid = Number(market?.bestBid);
+  const bestAsk = Number(market?.bestAsk);
+  let mid = Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestAsk > 0 ? (bestBid + bestAsk) / 2 : Number(market?.lastTradePrice);
+  if (Number.isFinite(mid)) {
+    if (mid <= 1) return Math.round(mid * 100);
+    if (mid > 100) return Math.round(mid / 100);
+    return Math.round(mid);
+  }
+  return null;
+}
+
+export function renderPolymarketEmbed(event) {
   const root = document.createElement("div");
   root.className = "__simple_x_inject";
 
+  const header = document.createElement("div");
+  header.style.display = "flex";
+  header.style.gap = "10px";
+  header.style.alignItems = "center";
+  header.style.marginBottom = "6px";
+
+  const imgUrl = event?.icon || event?.image || event?.featuredImage;
+  if (imgUrl) {
+    const img = document.createElement("img");
+    img.src = imgUrl;
+    img.alt = "";
+    img.referrerPolicy = "no-referrer";
+    img.style.width = "36px";
+    img.style.height = "36px";
+    img.style.objectFit = "cover";
+    img.style.borderRadius = "8px";
+    img.style.flex = "0 0 auto";
+    header.appendChild(img);
+  }
+
+  const headerText = document.createElement("div");
+  headerText.style.display = "flex";
+  headerText.style.flexDirection = "column";
+
   const title = document.createElement("div");
   title.style.fontWeight = "600";
-  title.style.marginBottom = "6px";
-  title.textContent = market?.question || "Polymarket";
+  const sim = typeof event?._similarity === "number" ? `  •  ${(event._similarity).toFixed(2)}` : "";
+  title.textContent = `${event?.title || "Polymarket"}${sim}`;
 
   const meta = document.createElement("div");
   meta.style.opacity = "0.8";
-  meta.style.marginBottom = "8px";
-  const cat = market?.category ? `• ${market.category}` : "";
-  const ends = market?.endDate ? `• Ends: ${new Date(market.endDate).toLocaleString()}` : "";
-  meta.textContent = [cat, ends].filter(Boolean).join("  ");
+  meta.style.marginTop = "2px";
+  const cat = event?.category ? `• ${event.category}` : "";
+  meta.textContent = [cat].filter(Boolean).join("  ");
 
-  const prices = document.createElement("div");
-  const outcomes = parseMaybeJsonArray(market?.outcomes);
-  const outcomePrices = parseMaybeJsonArray(market?.outcomePrices);
-  prices.style.display = "grid";
-  prices.style.gridTemplateColumns = "1fr auto";
-  prices.style.gap = "6px 12px";
-  prices.style.marginBottom = "8px";
-  for (let i = 0; i < outcomes.length; i++) {
-    const o = document.createElement("div");
-    o.textContent = String(outcomes[i]);
-    const p = document.createElement("div");
-    p.style.textAlign = "right";
-    const val = Number(outcomePrices[i] ?? 0);
-    p.textContent = isFinite(val) ? `${(val * 100).toFixed(1)}%` : "";
-    prices.appendChild(o);
-    prices.appendChild(p);
-  }
+  headerText.appendChild(title);
+  headerText.appendChild(meta);
+  header.appendChild(headerText);
+
+  // Outcomes grid removed to simplify header
 
   const chartContainer = document.createElement("div");
-  chartContainer.style.marginTop = outcomes.length ? "8px" : "0px";
+  chartContainer.style.marginTop = "8px";
   chartContainer.style.height = "140px";
   chartContainer.style.width = "100%";
   chartContainer.style.position = "relative";
@@ -139,31 +190,59 @@ export function renderPolymarketEmbed(market) {
   chartContainer.appendChild(chartStatus);
 
   const desc = document.createElement("div");
-  desc.style.marginTop = "6px";
-  desc.style.maxHeight = "80px";
+  desc.style.marginTop = "8px";
+  desc.style.display = "-webkit-box";
+  desc.style.webkitBoxOrient = "vertical";
+  desc.style.webkitLineClamp = "2";
   desc.style.overflow = "hidden";
   desc.style.textOverflow = "ellipsis";
-  desc.textContent = market?.description || "";
+  desc.textContent = event?.description || "";
 
-  const link = document.createElement("a");
-  link.href = market?.slug ? `https://polymarket.com/market/${market.slug}` : "https://polymarket.com";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.style.display = "inline-block";
-  link.style.marginTop = "8px";
-  link.style.color = "#1d9bf0";
-  link.textContent = "View on Polymarket";
+  const toggle = document.createElement("button");
+  toggle.textContent = "Show more";
+  toggle.style.display = "none";
+  toggle.style.background = "transparent";
+  toggle.style.border = "none";
+  toggle.style.color = "#3dd68c";
+  toggle.style.cursor = "pointer";
+  toggle.style.padding = "0";
+  toggle.style.marginTop = "4px";
 
-  root.appendChild(title);
-  root.appendChild(meta);
-  if (outcomes.length) root.appendChild(prices);
-  // Chart lives before description/link
+  root.appendChild(header);
+  // If matches list is provided (lightweight mode), render list and skip chart/detail
+  if (Array.isArray(event?.matches) && event.matches.length) {
+    const list = document.createElement("div");
+    list.style.display = "grid";
+    list.style.gridTemplateColumns = "1fr";
+    list.style.gap = "6px";
+    for (const m of event.matches) {
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.justifyContent = "space-between";
+      const left = document.createElement("div");
+      left.textContent = String(m?.question || m?.title || m?.id || "");
+      left.style.fontWeight = "500";
+      const right = document.createElement("div");
+      const s = typeof m?.similarity === "number" ? m.similarity.toFixed(2) : "";
+      right.textContent = s;
+      right.style.opacity = "0.7";
+      row.appendChild(left);
+      row.appendChild(right);
+      list.appendChild(row);
+    }
+    root.appendChild(list);
+    return root;
+  }
+
+  // Chart lives before description
   root.appendChild(chartContainer);
-  if (market?.description) root.appendChild(desc);
-  root.appendChild(link);
+  if (event?.description) root.appendChild(desc);
+  if (event?.description) root.appendChild(toggle);
 
   // Kick off async chart load
-  const tokenId = deriveTokenId(market);
+  const primaryMarket = pickPrimaryMarketFromEvent(event);
+  const tokenId = primaryMarket ? deriveTokenId(primaryMarket) : null;
   if (tokenId) {
     // Defer to ensure element is in DOM for accurate sizing
     queueMicrotask(async () => {
@@ -175,16 +254,16 @@ export function renderPolymarketEmbed(market) {
         const chart = createChart(chartContainer, {
           width: initialWidth,
           height: 140,
-          layout: { background: { color: "transparent" }, textColor: "#666" },
+          layout: { attributionLogo: false, background: { color: "transparent" }, textColor: "#666" },
           grid: { vertLines: { color: "rgba(0,0,0,0.07)" }, horzLines: { color: "rgba(0,0,0,0.07)" } },
           rightPriceScale: { visible: true, borderVisible: false },
           timeScale: { borderVisible: false },
           watermark: { visible: false },
         });
         const series = chart.addAreaSeries({
-          lineColor: "#1d9bf0",
-          topColor: "rgba(29,155,240,0.25)",
-          bottomColor: "rgba(29,155,240,0.0)",
+          lineColor: "#3dd68c",
+          topColor: "rgba(61,214,140,0.25)",
+          bottomColor: "rgba(61,214,140,0.0)",
           priceFormat: {
             type: "custom",
             minMove: 0.01,
@@ -210,6 +289,88 @@ export function renderPolymarketEmbed(market) {
     });
   } else {
     chartStatus.textContent = "Chart unavailable";
+  }
+
+  if (event?.description) {
+    queueMicrotask(() => {
+      const isOverflowing = desc.scrollHeight > desc.clientHeight + 1;
+      toggle.style.display = isOverflowing ? "inline" : "none";
+    });
+    let expanded = false;
+    toggle.addEventListener("click", () => {
+      expanded = !expanded;
+      if (expanded) {
+        desc.style.webkitLineClamp = "";
+        desc.style.display = "block";
+        toggle.textContent = "Show less";
+      } else {
+        desc.style.display = "-webkit-box";
+        desc.style.webkitBoxOrient = "vertical";
+        desc.style.webkitLineClamp = "2";
+        toggle.textContent = "Show more";
+      }
+    });
+  }
+
+  // Sub-markets list
+  const mkts = Array.isArray(event?.markets) ? event.markets.slice() : [];
+  if (mkts.length) {
+    mkts.sort((a, b) => (Number(b?.liquidityClob || 0) + Number(b?.liquidityAmm || 0)) - (Number(a?.liquidityClob || 0) + Number(a?.liquidityAmm || 0)));
+    const list = document.createElement("div");
+    list.style.display = "grid";
+    list.style.gridTemplateColumns = "1fr";
+    list.style.gap = "8px";
+    list.style.marginTop = "10px";
+    for (const m of mkts) {
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.justifyContent = "space-between";
+      row.style.padding = "8px 10px";
+      row.style.border = "1px solid rgba(0,0,0,0.08)";
+      row.style.borderRadius = "8px";
+
+      const left = document.createElement("div");
+      left.style.display = "flex";
+      left.style.alignItems = "center";
+      left.style.gap = "8px";
+
+      if (m?.icon || m?.image) {
+        const mi = document.createElement("img");
+        mi.src = m.icon || m.image;
+        mi.alt = "";
+        mi.referrerPolicy = "no-referrer";
+        mi.style.width = "20px";
+        mi.style.height = "20px";
+        mi.style.objectFit = "cover";
+        mi.style.borderRadius = "4px";
+        left.appendChild(mi);
+      }
+
+      const label = document.createElement("div");
+      label.textContent = String(m?.groupItemTitle || m?.question || m?.title || "");
+      label.style.fontWeight = "500";
+      left.appendChild(label);
+
+      const right = document.createElement("div");
+      const pct = extractYesPercent(m);
+      right.textContent = Number.isFinite(pct) ? `${pct}%` : "--";
+      right.style.fontWeight = "700";
+      right.style.color = "#16a34a";
+      right.style.marginLeft = "12px";
+
+      row.appendChild(left);
+      row.appendChild(right);
+
+      row.style.cursor = "pointer";
+      row.addEventListener("click", () => {
+        const slug = m?.slug || event?.slug;
+        if (slug) window.open(`https://polymarket.com/market/${encodeURIComponent(slug)}`, "_blank");
+      });
+
+      list.appendChild(row);
+    }
+    root.appendChild(list);
   }
 
   return root;
